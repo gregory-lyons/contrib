@@ -5,6 +5,7 @@ VOLUME ["/git"]
 
 RUN apt-get update && \
   apt-get install -y git ca-certificates --no-install-recommends && \
+  apt-get install -y openssh-server && \
   apt-get clean -y && \
   rm -rf /var/lib/apt/lists/*
 

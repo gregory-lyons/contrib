@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"io/ioutil"
 )
 
 var flRepo = flag.String("repo", envString("GIT_SYNC_REPO", ""), "git repo url")
@@ -39,12 +40,13 @@ var flDest = flag.String("dest", envString("GIT_SYNC_DEST", ""), "destination pa
 var flWait = flag.Int("wait", envInt("GIT_SYNC_WAIT", 0), "number of seconds to wait before next sync")
 var flOneTime = flag.Bool("one-time", envBool("GIT_SYNC_ONE_TIME", false), "exit after the initial checkout")
 var flDepth = flag.Int("depth", envInt("GIT_SYNC_DEPTH", 0), "shallow clone with a history truncated to the specified number of commits")
-
 var flMaxSyncFailures = flag.Int("max-sync-failures", envInt("GIT_SYNC_MAX_SYNC_FAILURES", 0),
 	`number of consecutive failures allowed before aborting (the first pull must succeed)`)
 
 var flUsername = flag.String("username", envString("GIT_SYNC_USERNAME", ""), "username")
 var flPassword = flag.String("password", envString("GIT_SYNC_PASSWORD", ""), "password")
+
+var flSSH = flag.Bool("ssh", envBool("GIT_SYNC_SSH", false), "use SSH protocol")
 
 var flChmod = flag.Int("change-permissions", envInt("GIT_SYNC_PERMISSIONS", 0), `If set it will change the permissions of the directory 
 		that contains the git repository. Example: 744`)
@@ -95,6 +97,12 @@ func main() {
 	if *flUsername != "" && *flPassword != "" {
 		if err := setupGitAuth(*flUsername, *flPassword, *flRepo); err != nil {
 			log.Fatalf("error creating .netrc file: %v", err)
+		}
+	}
+
+	if *flSSH {
+		if err := setupGitSSH(); err != nil {
+			log.Fatalf("error configuring ssh: %v", err)
 		}
 	}
 
@@ -211,5 +219,29 @@ func setupGitAuth(username, password, gitURL string) error {
 		return fmt.Errorf("error setting up git credentials %v: %s", err, string(output))
 	}
 
+	return nil
+}
+
+func setupGitSSH() error {
+	log.Println("setting up git SSH credentials")
+
+	if _, err := os.Stat("/etc/git-secret/id-rsa"); err != nil {
+		log.Fatal("error: could not find SSH secret at /etc/git-secret/id-rsa")
+	}
+
+	if err := os.Mkdir("/root/.ssh", 0600); err != nil {
+		log.Fatal("error creating /root/.ssh directory: %v", err)
+	}
+	config := []byte("IdentityFile /etc/git-secret/id-rsa\nUserKnownHostsFile /dev/null\nStrictHostKeyChecking no\n")
+	if err := ioutil.WriteFile("/root/.ssh/config", config, 0400); err != nil {
+		return fmt.Errorf("error creating ssh config file: %v", err)
+	}
+	// Secret permissions must be restricted to use it as SSH key
+	if err := os.Chmod("/etc/git-secret/id-rsa", 0400); err != nil {
+
+		// Need to make sure secret volume isn't mounted readOnly, which gives default permission 0444
+		// 0444 is not restrictive enough to use as SSH key, but also prevents chmod
+		return fmt.Errorf("error running chmod on secret (make sure secret volume is NOT mounted with readOnly=true): %v", err)
+	}
 	return nil
 }
