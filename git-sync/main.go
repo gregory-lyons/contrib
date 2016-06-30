@@ -49,6 +49,9 @@ var flPassword = flag.String("password", envString("GIT_SYNC_PASSWORD", ""), "pa
 var flChmod = flag.Int("change-permissions", envInt("GIT_SYNC_PERMISSIONS", 0), `If set it will change the permissions of the directory 
 		that contains the git repository. Example: 744`)
 
+var flSubDir = flag.String("subdir", envString("GIT_SYNC_SUBDIR", ""), "target subdirectory path within destination path")
+var flAtomic = flag.Bool("atomic", envBool("GIT_SYNC_ATOMIC", false), "initial pull is atomic")
+
 func envString(key, def string) string {
 	if env := os.Getenv(key); env != "" {
 		return env
@@ -80,7 +83,7 @@ func envInt(key string, def int) int {
 	return def
 }
 
-const usage = "usage: GIT_SYNC_REPO= GIT_SYNC_DEST= [GIT_SYNC_BRANCH= GIT_SYNC_WAIT= GIT_SYNC_DEPTH= GIT_SYNC_USERNAME= GIT_SYNC_PASSWORD= GIT_SYNC_ONE_TIME= GIT_SYNC_MAX_SYNC_FAILURES=] git-sync -repo GIT_REPO_URL -dest PATH [-branch -wait -username -password -depth -one-time -max-sync-failures]"
+const usage = "usage: GIT_SYNC_REPO= GIT_SYNC_DEST= [GIT_SYNC_BRANCH= GIT_SYNC_WAIT= GIT_SYNC_DEPTH= GIT_SYNC_USERNAME= GIT_SYNC_PASSWORD= GIT_SYNC_ONE_TIME= GIT_SYNC_MAX_SYNC_FAILURES= GIT_SYNC_SUBDIR= GIT_SYNC_ATOMIC=] git-sync -repo GIT_REPO_URL -dest PATH [-branch -wait -username -password -depth -one-time -max-sync-failures -atomic -subdir]"
 
 func main() {
 	flag.Parse()
@@ -98,10 +101,14 @@ func main() {
 		}
 	}
 
+	if *flAtomic == true && *flSubDir == "" {
+		log.Fatal("error: GIT_SYNC_SUBDIR is required for atomic initial pull")
+	}
+
 	initialSync := true
 	failCount := 0
 	for {
-		if err := syncRepo(*flRepo, *flDest, *flBranch, *flRev, *flDepth); err != nil {
+		if err := syncRepo(*flRepo, *flDest, *flBranch, *flRev, *flSubDir, *flDepth, *flAtomic); err != nil {
 			if initialSync || failCount >= *flMaxSyncFailures {
 				log.Fatalf("error syncing repo: %v", err)
 			}
@@ -127,11 +134,20 @@ func main() {
 }
 
 // syncRepo syncs the branch of a given repository to the destination at the given rev.
-func syncRepo(repo, dest, branch, rev string, depth int) error {
-	gitRepoPath := path.Join(dest, ".git")
+func syncRepo(repo, dest, branch, rev, subdir string, depth int, atomic bool) error {
+	pullTarget := path.Join(dest, subdir)
+	gitRepoPath := path.Join(pullTarget, ".git")
 	_, err := os.Stat(gitRepoPath)
 	switch {
 	case os.IsNotExist(err):
+		if atomic {
+			pullTarget = path.Join(dest, "data-tmp")
+			err := os.Mkdir(pullTarget, 0644)
+			if err != nil {
+				return fmt.Errorf("error creating tempdir for atomic pull: %v", err)
+			}
+		}
+
 		// clone repo
 		args := []string{"clone", "--no-checkout", "-b", branch}
 		if depth != 0 {
@@ -139,7 +155,7 @@ func syncRepo(repo, dest, branch, rev string, depth int) error {
 			args = append(args, string(depth))
 		}
 		args = append(args, repo)
-		args = append(args, dest)
+		args = append(args, pullTarget)
 		output, err := runCommand("git", "", args)
 		if err != nil {
 			return err
@@ -151,7 +167,7 @@ func syncRepo(repo, dest, branch, rev string, depth int) error {
 	}
 
 	// fetch branch
-	output, err := runCommand("git", dest, []string{"pull", "origin", branch})
+	output, err := runCommand("git", pullTarget, []string{"pull", "origin", branch})
 	if err != nil {
 		return err
 	}
@@ -159,7 +175,7 @@ func syncRepo(repo, dest, branch, rev string, depth int) error {
 	log.Printf("fetch %q: %s", branch, string(output))
 
 	// reset working copy
-	output, err = runCommand("git", dest, []string{"reset", "--hard", rev})
+	output, err = runCommand("git", pullTarget, []string{"reset", "--hard", rev})
 	if err != nil {
 		return err
 	}
@@ -168,12 +184,18 @@ func syncRepo(repo, dest, branch, rev string, depth int) error {
 
 	if *flChmod != 0 {
 		// set file permissions
-		_, err = runCommand("chmod", "", []string{"-R", string(*flChmod), dest})
+		_, err = runCommand("chmod", "", []string{"-R", string(*flChmod), pullTarget})
 		if err != nil {
 			return err
 		}
 	}
 
+	if atomic && strings.Compare(pullTarget, path.Join(dest, subdir)) != 0 {
+		err := os.Rename(pullTarget, path.Join(dest, subdir))
+		if err != nil {
+			return fmt.Errorf("error renaming tempdir to target subdir: %v", err)
+		}
+	}
 	return nil
 }
 
